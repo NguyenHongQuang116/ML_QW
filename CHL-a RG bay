@@ -1,0 +1,174 @@
+var AOI = 
+    /* color: #d63000 */
+    /* shown: false */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[104.51, 10.4],
+          [105.1139, 10.4],
+          [105.1139, 9.78],
+          [104.51, 9.78]]], null, false),
+    Point = 
+    /* color: #98ff00 */
+    /* shown: false */
+    ee.Geometry.Point([104.833, 10.00]);
+
+function maskS2clouds(image) {
+  var qa = image.select('QA60');
+
+  // Bits 10 and 11 are clouds and cirrus, respectively.
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+
+  return image.updateMask(mask).divide(10000).copyProperties(image).set('system:time_start', image.get('system:time_start'));}
+
+var img = ee.ImageCollection('COPERNICUS/S2')
+                  .filterDate('2015-01-01', '2021-12-01')
+                  // Pre-filter to get less cloudy granules.
+                  .filterBounds(AOI)
+                  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',50))
+                  .map(maskS2clouds);
+var visualization = {min: 0.0,max: 0.3,bands: ['B4', 'B3', 'B2'],};
+Map.centerObject(AOI,12);
+Map.addLayer(img.median().clip(AOI), visualization, 'RGB');
+// Chl-a calculation
+var img = img.map(function(image) {
+  return image.addBands(
+    image.expression(
+    '(33.95*(B5/B4)-5.3)', {
+      'B1': image.select('B1'),
+      'B2': image.select('B2'),
+      'B3': image.select('B3'),
+      'B4': image.select('B4'),
+      'B5': image.select('B5'),
+      'B6': image.select('B6'),
+      'B7': image.select('B7')
+
+}).rename('CHLA').float());
+});
+var CHLA = img.select('[CHLA]');
+// NDWI Calculation
+var addNDWI = function(image) {
+  var ndwi = image.normalizedDifference(['B3', 'B8']).rename('NDWI');
+return image.addBands(ndwi);
+};
+var img = img.map(addNDWI);
+// NDWIR calculation
+var addNDWIR = function(image) {
+  var ndwir= image.select(['NDWI']).gt(0.1).rename('NDWIR');
+return image.addBands(ndwir);  
+};
+var img = img.map(addNDWIR);
+// CHLAR calculation
+var img = img.map(function(image){
+  var chlar = (image.select(['CHLA'])).multiply(image.select(['NDWIR'])).rename('CHLAR');
+return image.addBands(chlar);
+});
+// Add CHLAR to image collection and extract
+var CHLAR = img.select(['CHLAR']);
+var CHLARmean = CHLAR.mean(); 
+var CHLAR_pal = ['152106', '225129', '369b47', '30eb5b', '387242'];
+// Create a time series chart.
+var plotCHLAR = ui.Chart.image.seriesByRegion(img, AOI,ee.Reducer.mean(),
+'CHLAR',200,'system:time_start', 'system:index')
+              .setChartType('LineChart').setOptions({
+                title: 'CHLAR time series',
+                hAxis: {title: 'Date'},
+                vAxis: {title: 'Chl-a (mg/m^3)'}
+});
+
+// Display.
+print(plotCHLAR);
+
+// Display CHLAR results on map
+// 3. Classify NDVI into 5 classes
+var CHLARmean = ee.Image(1)
+          .where(CHLARmean.gt(0.0).and(CHLARmean.lte(22)), 2)
+          .where(CHLARmean.gt(22).and(CHLARmean.lte(23)), 3)
+          .where(CHLARmean.gt(23).and(CHLARmean.lte(24)), 4)
+          .where(CHLARmean.gt(25), 5)
+// Add map layers
+var CHLARmean = CHLARmean.clip(AOI);
+Map.addLayer(CHLARmean, {min:1, max:5, palette: ['#654321','#FFA500','#FFFF00', '#00FF00', '#008000']}, 'CHLAR',true);
+print(img);
+// Add map title
+var mapTitle = ui.Panel({
+  style: {
+    position: 'top-center',
+    padding: '8px 15px'
+  }
+});
+var mapTitle2 = ui.Label({
+  value: 'Map of CHL-A',
+  style: {
+    fontWeight: 'bold',
+    fontSize: '20px',
+    margin: '0 0 3px 0',
+    padding: '0'
+    }
+});
+mapTitle.add(mapTitle2);
+Map.add(mapTitle);
+// Add map legend
+var legend = ui.Panel({
+  style: {
+    position: 'bottom-right',
+    padding: '8px 15px'
+  }
+});
+var legend2 = ui.Label({
+  value: 'Chl-a (mg/m^3)',
+  style: {
+    fontWeight: 'bold',
+    fontSize: '18px',
+    margin: '0 0 4px 0',
+    padding: '0'
+    }
+});
+legend.add(legend2);
+// Creates the content of the legend
+var content = function(color, label) {
+      // Create the color boxes
+      var box = ui.Label({
+        style: {
+          backgroundColor: '#' + color,
+          // Set box height and width
+          padding: '9px',
+          margin: '0 0 4px 0'
+        }
+      });
+      // Create the labels
+      var labels = ui.Label({
+        value: label,
+        style: {margin: '0 0 4px 6px'}
+      });
+      return ui.Panel({
+        widgets: [box, labels],
+        layout: ui.Panel.Layout.Flow('horizontal')
+      });
+};
+//  Set legend colors
+var classcolor = ['654321','FFA500','FFFF00', '00FF00', '008000'];
+// Set legend labels
+var labelName = ['0','5 - 10','11 - 15','16 - 20', '>20'];
+// Combine legend colou and labels
+for (var i = 0; i < 5; i++) {
+  legend.add(content(classcolor[i], labelName[i]));
+  }  
+// Add legend
+Map.add(legend);
+// Export and save to drive
+Export.image.toDrive({
+  image: CHLARmean,
+  description: 'Chl-a',
+  scale: 30,
+  fileFormat: 'GeoTIFF',
+  region: AOI
+});
